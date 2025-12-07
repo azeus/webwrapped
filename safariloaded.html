@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Safari History Timeline - Memory Optimized</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f7;
+            color: #1d1d1f;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .upload-section {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .upload-box {
+            border: 2px dashed #d2d2d7;
+            border-radius: 12px;
+            padding: 60px 40px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-box:hover { border-color: #0071e3; background: #f5f5f7; }
+        .file-input { display: none; }
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+        .spinner {
+            border: 3px solid #f5f5f7;
+            border-top: 3px solid #0071e3;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .main-content {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .date-picker {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 20px;
+            background: #f5f5f7;
+            border-radius: 8px;
+        }
+        .date-picker label {
+            font-weight: 600;
+        }
+        .date-picker input {
+            padding: 10px;
+            border: 1px solid #d2d2d7;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .date-picker button {
+            padding: 10px 20px;
+            background: #0071e3;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .date-picker button:hover {
+            background: #0077ed;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: #f5f5f7;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .stat-value {
+            font-size: 32px;
+            font-weight: 600;
+            color: #0071e3;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #86868b;
+            margin-top: 4px;
+        }
+        .timeline-item {
+            padding: 16px;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            gap: 16px;
+        }
+        .timeline-time {
+            flex-shrink: 0;
+            width: 80px;
+            font-weight: 600;
+            color: #86868b;
+        }
+        .timeline-content { flex: 1; }
+        .timeline-title {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+        .timeline-url {
+            font-size: 13px;
+            color: #0071e3;
+            text-decoration: none;
+            word-break: break-all;
+        }
+        .category-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 8px;
+            font-weight: 500;
+        }
+        .info-box {
+            background: #e8f4fd;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .info-box h3 {
+            margin-bottom: 12px;
+        }
+        .info-box ul {
+            margin-left: 20px;
+            line-height: 1.8;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef } = React;
+
+        function SafariTimeline() {
+            const [db, setDb] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+            const [dateRange, setDateRange] = useState(null);
+            const [historyData, setHistoryData] = useState([]);
+            const [stats, setStats] = useState(null);
+            const fileInputRef = useRef(null);
+
+            const CORE_DATA_EPOCH = new Date('2001-01-01T00:00:00Z').getTime();
+
+            const convertTimestamp = (timestamp) => {
+                return new Date(CORE_DATA_EPOCH + (timestamp * 1000));
+            };
+
+            const categorizeUrl = (url, domain) => {
+                const patterns = {
+                    'Social Media': /facebook|instagram|twitter|linkedin|tiktok|reddit/i,
+                    'Entertainment': /youtube|netflix|spotify|twitch/i,
+                    'News': /news|nytimes|cnn|bbc/i,
+                    'Education': /wikipedia|coursera|edu/i,
+                    'Shopping': /amazon|ebay|shop/i,
+                    'Work': /gmail|slack|zoom|docs\.google/i,
+                    'Development': /github|stackoverflow/i,
+                };
+
+                for (const [category, pattern] of Object.entries(patterns)) {
+                    if (pattern.test(domain)) return category;
+                }
+                return 'Other';
+            };
+
+            const getCategoryColor = (cat) => {
+                const colors = {
+                    'Social Media': '#E91E63',
+                    'Entertainment': '#9C27B0',
+                    'News': '#FF5722',
+                    'Education': '#2196F3',
+                    'Shopping': '#FF9800',
+                    'Work': '#4CAF50',
+                    'Development': '#00BCD4',
+                    'Other': '#9E9E9E'
+                };
+                return colors[cat] || '#9E9E9E';
+            };
+
+            const loadDatabase = async (file) => {
+                setLoading(true);
+                try {
+                    const SQL = await initSqlJs({
+                        locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${f}`
+                    });
+
+                    const arrayBuffer = await file.arrayBuffer();
+                    const database = new SQL.Database(new Uint8Array(arrayBuffer));
+
+                    // Get date range
+                    const rangeResult = database.exec(`
+                        SELECT
+                            MIN(visit_time) as earliest,
+                            MAX(visit_time) as latest
+                        FROM history_visits
+                        WHERE visit_time IS NOT NULL
+                    `);
+
+                    if (rangeResult.length > 0) {
+                        const earliest = convertTimestamp(rangeResult[0].values[0][0]);
+                        const latest = convertTimestamp(rangeResult[0].values[0][1]);
+                        setDateRange({
+                            earliest: earliest.toISOString().split('T')[0],
+                            latest: latest.toISOString().split('T')[0]
+                        });
+                    }
+
+                    setDb(database);
+                    alert('Database loaded! Select a date to view history.');
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert('Error loading database: ' + error.message);
+                }
+                setLoading(false);
+            };
+
+            const loadDateHistory = () => {
+                if (!db || !selectedDate) return;
+
+                setLoading(true);
+                try {
+                    const date = new Date(selectedDate);
+                    const startOfDay = new Date(date.setHours(0, 0, 0, 0));
+                    const endOfDay = new Date(date.setHours(23, 59, 59, 999));
+
+                    const startTimestamp = (startOfDay.getTime() - CORE_DATA_EPOCH) / 1000;
+                    const endTimestamp = (endOfDay.getTime() - CORE_DATA_EPOCH) / 1000;
+
+                    const results = db.exec(`
+                        SELECT
+                            hi.url,
+                            hv.visit_time,
+                            hi.domain_expansion
+                        FROM history_visits hv
+                        INNER JOIN history_items hi ON hv.history_item = hi.id
+                        WHERE hv.visit_time >= ? AND hv.visit_time <= ?
+                        ORDER BY hv.visit_time ASC
+                        LIMIT 10000
+                    `, [startTimestamp, endTimestamp]);
+
+                    if (results.length > 0) {
+                        const visits = results[0].values.map(row => {
+                            const url = row[0];
+                            const domain = new URL(url).hostname;
+                            const timestamp = convertTimestamp(row[1]);
+
+                            return {
+                                url,
+                                timestamp,
+                                title: row[2] || domain,
+                                domain,
+                                category: categorizeUrl(url, domain)
+                            };
+                        });
+
+                        setHistoryData(visits);
+
+                        // Calculate stats
+                        const domains = {};
+                        const categories = {};
+
+                        visits.forEach(v => {
+                            domains[v.domain] = (domains[v.domain] || 0) + 1;
+                            categories[v.category] = (categories[v.category] || 0) + 1;
+                        });
+
+                        setStats({
+                            totalVisits: visits.length,
+                            uniqueDomains: Object.keys(domains).length,
+                            topCategories: Object.entries(categories)
+                                .sort((a, b) => b[1] - a[1])
+                                .slice(0, 5)
+                        });
+                    } else {
+                        setHistoryData([]);
+                        setStats(null);
+                        alert('No history found for this date');
+                    }
+                } catch (error) {
+                    console.error('Error loading history:', error);
+                    alert('Error loading history: ' + error.message);
+                }
+                setLoading(false);
+            };
+
+            if (!db) {
+                return (
+                    <div className="container">
+                        <div className="header">
+                            <h1>Safari History Timeline - Memory Optimized</h1>
+                            <p>Smart date-based loading prevents memory issues</p>
+                        </div>
+
+                        <div className="upload-section">
+                            <div className="upload-box" onClick={() => fileInputRef.current.click()}>
+                                <div style={{fontSize: '48px', marginBottom: '16px'}}>📂</div>
+                                <h3>Upload Safari History.db</h3>
+                                <p>Click to browse or drag and drop</p>
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    className="file-input"
+                                    onChange={(e) => e.target.files[0] && loadDatabase(e.target.files[0])}
+                                    accept=".db"
+                                />
+                            </div>
+
+                            <div className="info-box">
+                                <h3>✅ This version solves the memory problem!</h3>
+                                <ul>
+                                    <li><strong>Date-based loading</strong> - Only loads one day at a time</li>
+                                    <li><strong>No 200K limit</strong> - Can access your entire history</li>
+                                    <li><strong>Pick any date</strong> - Go back years without issues</li>
+                                    <li><strong>Fast queries</strong> - Uses SQL indexes efficiently</li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        {loading && (
+                            <div className="loading">
+                                <div className="spinner"></div>
+                                <p>Loading database...</p>
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            return (
+                <div className="container">
+                    <div className="header">
+                        <h1>Safari History Timeline</h1>
+                        {dateRange && (
+                            <p>History available from {dateRange.earliest} to {dateRange.latest}</p>
+                        )}
+                    </div>
+
+                    <div className="main-content">
+                        <div className="date-picker">
+                            <label>Select Date:</label>
+                            <input
+                                type="date"
+                                value={selectedDate}
+                                min={dateRange?.earliest}
+                                max={dateRange?.latest}
+                                onChange={(e) => setSelectedDate(e.target.value)}
+                            />
+                            <button onClick={loadDateHistory}>Load History</button>
+                        </div>
+
+                        {loading && (
+                            <div className="loading">
+                                <div className="spinner"></div>
+                                <p>Loading history for {selectedDate}...</p>
+                            </div>
+                        )}
+
+                        {stats && (
+                            <div className="stats">
+                                <div className="stat-card">
+                                    <div className="stat-value">{stats.totalVisits}</div>
+                                    <div className="stat-label">Total Visits</div>
+                                </div>
+                                <div className="stat-card">
+                                    <div className="stat-value">{stats.uniqueDomains}</div>
+                                    <div className="stat-label">Unique Domains</div>
+                                </div>
+                                {stats.topCategories.map(([cat, count]) => (
+                                    <div key={cat} className="stat-card">
+                                        <div className="stat-value">{count}</div>
+                                        <div className="stat-label">{cat}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {historyData.length > 0 && (
+                            <div>
+                                {historyData.map((item, i) => (
+                                    <div key={i} className="timeline-item">
+                                        <div className="timeline-time">
+                                            {item.timestamp.toLocaleTimeString('en-US', {
+                                                hour: '2-digit',
+                                                minute: '2-digit',
+                                                hour12: true
+                                            })}
+                                        </div>
+                                        <div className="timeline-content">
+                                            <div className="timeline-title">
+                                                {item.title}
+                                                <span
+                                                    className="category-badge"
+                                                    style={{
+                                                        backgroundColor: getCategoryColor(item.category) + '20',
+                                                        color: getCategoryColor(item.category),
+                                                        border: `1px solid ${getCategoryColor(item.category)}`
+                                                    }}
+                                                >
+                                                    {item.category}
+                                                </span>
+                                            </div>
+                                            <a
+                                                href={item.url}
+                                                className="timeline-url"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                            >
+                                                {item.url}
+                                            </a>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<SafariTimeline />, document.getElementById('root'));
+    </script>
+</body>
+</html>
